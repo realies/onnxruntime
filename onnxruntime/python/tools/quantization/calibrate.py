@@ -944,8 +944,9 @@ class HistogramCollector(CalibrationDataCollector):
             data_arr_np = np.absolute(data_arr_np)  # only consider absolute value
 
             if tensor not in self.histogram_dict:
-                # first time it uses num_bins to compute histogram.
-                hist, hist_edges = np.histogram(data_arr_np, bins=self.num_bins)
+                # Start at zero so later batches with smaller absolute values are included.
+                hist_range = (0, np.max(data_arr_np)) if data_arr_np.size else None
+                hist, hist_edges = np.histogram(data_arr_np, bins=self.num_bins, range=hist_range)
                 hist_edges = hist_edges.astype(data_arr_np.dtype)
                 assert data_arr_np.dtype != np.float64, (
                     "only float32 or float16 is supported, every constant must be explicitly typed"

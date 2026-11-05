@@ -20,6 +20,7 @@ from onnxruntime.quantization import quantize_static
 from onnxruntime.quantization.calibrate import (
     CalibrationDataReader,
     CalibrationMethod,
+    HistogramCollector,
     TensorData,
     TensorsData,
     create_calibrator,
@@ -374,6 +375,28 @@ class TestCalibrateMinMaxCalibrator(unittest.TestCase):
         output_min_max_dict = dict(zip(output_names, min_max_pairs, strict=False))
         for output_name, min_max in output_min_max_dict.items():
             self.assertEqual(min_max, tensors_range[output_name].range_value)
+
+    def test_collect_absolute_value_includes_smaller_values(self):
+        for dtype in (np.float16, np.float32):
+            for first_batch in ([1, 2], [-1, -2], [2, 2], [0, 0], []):
+                with self.subTest(dtype=dtype, first_batch=first_batch):
+                    collector = HistogramCollector(
+                        method="percentile",
+                        symmetric=True,
+                        num_bins=4,
+                        num_quantized_bins=128,
+                        percentile=50,
+                        scenario="same",
+                    )
+                    count = 0
+                    for batch in (first_batch, [0, 0.5], [3, 4]):
+                        collector.collect({"input": np.array(batch, dtype=dtype)})
+                        count += len(batch)
+                        hist, hist_edges, _, _ = collector.histogram_dict["input"]
+                        self.assertEqual(hist.sum(), count)
+                        self.assertEqual(hist_edges.dtype, dtype)
+                    self.assertLessEqual(hist_edges[0], 0)
+                    self.assertGreaterEqual(hist_edges[-1], 4)
 
     def test_histogram_calibrators_run(self):
         """
