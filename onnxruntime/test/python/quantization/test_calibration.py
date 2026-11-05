@@ -397,29 +397,84 @@ class TestCalibrateMinMaxCalibrator(unittest.TestCase):
                         self.assertEqual(hist.sum(), count)
                         self.assertEqual(len(hist), collector.num_bins)
                         self.assertEqual(hist_edges.dtype, dtype)
-                    self.assertLessEqual(hist_edges[0], 0)
+                        self.assertEqual(hist_edges[0], 0)
                     self.assertGreaterEqual(hist_edges[-1], 4)
 
-    def test_percentile_first_bin_uses_upper_edge(self):
-        for value in (0, 0.0001, -0.0001):
-            with self.subTest(value=value):
-                collector = HistogramCollector(
-                    method="percentile",
-                    symmetric=True,
-                    num_bins=2048,
-                    num_quantized_bins=128,
-                    percentile=99.999,
-                    scenario="same",
-                )
-                data = np.full(100001, value, dtype=np.float32)
-                data[-1] = 1
-                collector.collect({"input": data})
+    def test_collect_absolute_value_float16_growth(self):
+        for num_bins in (8, 1024):
+            with self.subTest(num_bins=num_bins):
+                collector = HistogramCollector("percentile", True, num_bins, 128, 99.999, "same")
+                collector.collect({"input": np.array([40000], dtype=np.float16)})
+                old_hist = collector.histogram_dict["input"][0]
+                batch = np.array([50000, 1, 65504], dtype=np.float16)
+                collector.collect({"input": batch})
+                hist, edges, _, _ = collector.histogram_dict["input"]
+                expected_edges = np.linspace(0, 80000, num_bins + 1).clip(max=65504).astype(np.float16)
+                np.testing.assert_array_equal(edges, expected_edges)
+                self.assertTrue(np.isfinite(edges).all())
+                self.assertEqual(edges.dtype, np.float16)
+                self.assertEqual(hist.sum(), 4)
+                expected_hist, _ = np.histogram(batch, bins=expected_edges)
+                expected_hist[: num_bins // 2] += old_hist.reshape(-1, 2).sum(axis=1)
+                np.testing.assert_array_equal(hist, expected_hist)
+
+    def test_percentile_zero_first_batch(self):
+        for dtype in (np.float16, np.float32):
+            with self.subTest(dtype=dtype):
+                collector = HistogramCollector("percentile", True, 8, 128, 99.999, "same")
+                collector.collect({"input": np.zeros(100000, dtype=dtype)})
+                collector.collect({"input": np.array([0.001, 2], dtype=dtype)})
+                hist, edges, _, _ = collector.histogram_dict["input"]
+                self.assertEqual(hist.sum(), 100002)
+                self.assertEqual(edges[0], 0)
                 lowest, highest = collector.compute_collection_result()["input"][:2]
-                self.assertEqual(highest, collector.histogram_dict["input"][1][1])
-                self.assertLessEqual(lowest, highest)
+                self.assertEqual(lowest, 0)
+                self.assertEqual(highest, edges[1])
                 _, scale = compute_scale_zp(lowest, highest, np.uint8(0), np.uint8(255))
                 self.assertGreater(scale, 0)
                 self.assertLess(scale, 1)
+
+    def test_percentile_first_bin_preserves_small_values(self):
+        for value in (0, 0.0001, -0.0001, 1e-7, -1e-7):
+            for streaming in (False, True):
+                with self.subTest(value=value, streaming=streaming):
+                    collector = HistogramCollector(
+                        method="percentile",
+                        symmetric=True,
+                        num_bins=2048,
+                        num_quantized_bins=128,
+                        percentile=99.999,
+                        scenario="same",
+                    )
+                    data = np.full(100001, value, dtype=np.float32)
+                    data[-1] = 1
+                    batches = (data[:50000] * 2, data[50000:]) if streaming else (data,)
+                    for batch in batches:
+                        collector.collect({"input": batch})
+                    lowest, highest = collector.compute_collection_result()["input"][:2]
+                    expected = np.float32(abs(value)) if value else collector.histogram_dict["input"][1][1]
+                    self.assertEqual(highest, expected)
+                    self.assertLessEqual(lowest, highest)
+                    zero_point, scale = compute_scale_zp(lowest, highest, np.uint8(0), np.uint8(255))
+                    self.assertGreater(scale, 0)
+                    self.assertLess(scale, 1)
+                    if value:
+                        quantized = np.clip(np.round(np.float32(value) / scale) + zero_point, 0, 255)
+                        self.assertNotEqual(quantized, zero_point)
+
+        for zero_batch in (False, True):
+            with self.subTest(mixed_signs=True, zero_batch=zero_batch):
+                collector = HistogramCollector("percentile", True, 2048, 128, 99.999, "same")
+                data = np.full(100001, 1e-7, dtype=np.float32)
+                data[::2] *= -1
+                data[-1] = 1
+                collector.collect({"input": data})
+                if zero_batch:
+                    collector.collect({"input": np.array([0], dtype=np.float32)})
+                lowest, highest = collector.compute_collection_result()["input"][:2]
+                expected = collector.histogram_dict["input"][1][1] if zero_batch else np.float32(1e-7)
+                self.assertEqual(highest, expected)
+                self.assertEqual(lowest, max(-expected, data.min()))
 
     def test_histogram_calibrators_run(self):
         """
