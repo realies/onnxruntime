@@ -27,6 +27,7 @@ from onnxruntime.quantization.calibrate import (
     load_tensors_data,
     save_tensors_data,
 )
+from onnxruntime.quantization.quant_utils import compute_scale_zp
 
 
 def generate_input_initializer(tensor_shape, tensor_dtype, input_name):
@@ -378,7 +379,7 @@ class TestCalibrateMinMaxCalibrator(unittest.TestCase):
 
     def test_collect_absolute_value_includes_smaller_values(self):
         for dtype in (np.float16, np.float32):
-            for first_batch in ([1, 2], [-1, -2], [2, 2], [0, 0], []):
+            for first_batch in ([1, 2], [-1, -2], [2, 2], [0.0625, 0.125], [0, 0], []):
                 with self.subTest(dtype=dtype, first_batch=first_batch):
                     collector = HistogramCollector(
                         method="percentile",
@@ -394,9 +395,31 @@ class TestCalibrateMinMaxCalibrator(unittest.TestCase):
                         count += len(batch)
                         hist, hist_edges, _, _ = collector.histogram_dict["input"]
                         self.assertEqual(hist.sum(), count)
+                        self.assertEqual(len(hist), collector.num_bins)
                         self.assertEqual(hist_edges.dtype, dtype)
                     self.assertLessEqual(hist_edges[0], 0)
                     self.assertGreaterEqual(hist_edges[-1], 4)
+
+    def test_percentile_first_bin_uses_upper_edge(self):
+        for value in (0, 0.0001, -0.0001):
+            with self.subTest(value=value):
+                collector = HistogramCollector(
+                    method="percentile",
+                    symmetric=True,
+                    num_bins=2048,
+                    num_quantized_bins=128,
+                    percentile=99.999,
+                    scenario="same",
+                )
+                data = np.full(100001, value, dtype=np.float32)
+                data[-1] = 1
+                collector.collect({"input": data})
+                lowest, highest = collector.compute_collection_result()["input"][:2]
+                self.assertEqual(highest, collector.histogram_dict["input"][1][1])
+                self.assertLessEqual(lowest, highest)
+                _, scale = compute_scale_zp(lowest, highest, np.uint8(0), np.uint8(255))
+                self.assertGreater(scale, 0)
+                self.assertLess(scale, 1)
 
     def test_histogram_calibrators_run(self):
         """

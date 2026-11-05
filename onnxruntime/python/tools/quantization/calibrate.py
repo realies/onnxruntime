@@ -962,11 +962,16 @@ class HistogramCollector(CalibrationDataCollector):
                 old_hist_edges = old_histogram[1]
                 temp_amax = np.nanmax(data_arr_np)
                 if temp_amax > old_hist_edges[-1]:
-                    # increase the number of bins
-                    width = old_hist_edges[1] - old_hist_edges[0]
-                    # NOTE: np.arange may create an extra bin after the one containing temp_amax
-                    new_bin_edges = np.arange(old_hist_edges[-1] + width, temp_amax + width, width)
-                    old_hist_edges = np.hstack((old_hist_edges, new_bin_edges))
+                    # Merge adjacent bins to cover the new range without increasing the bin count.
+                    old_range = float(old_hist_edges[-1]) - float(old_hist_edges[0])
+                    merge_factor = int(np.ceil((float(temp_amax) - float(old_hist_edges[0])) / old_range))
+                    old_hist = np.add.reduceat(old_hist, range(0, len(old_hist), merge_factor))
+                    old_hist_edges = np.linspace(
+                        old_hist_edges[0],
+                        float(old_hist_edges[0]) + merge_factor * old_range,
+                        self.num_bins + 1,
+                        dtype=data_arr_np.dtype,
+                    )
                 hist, hist_edges = np.histogram(data_arr_np, bins=old_hist_edges)
                 hist_edges = hist_edges.astype(data_arr_np.dtype)
                 hist[: len(old_hist)] += old_hist
@@ -1072,7 +1077,8 @@ class HistogramCollector(CalibrationDataCollector):
             total = hist.sum()
             cdf = np.cumsum(hist / total)
             if self.symmetric:
-                idx_right = np.searchsorted(cdf, percentile / 100.0)
+                # Use the first bin's upper edge to avoid a zero-width range.
+                idx_right = max(1, np.searchsorted(cdf, percentile / 100.0))
 
                 thresholds_dict[tensor] = (
                     -np.array(hist_edges[idx_right], dtype=hist_edges.dtype),
