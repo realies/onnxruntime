@@ -891,7 +891,6 @@ class HistogramCollector(CalibrationDataCollector):
 
     def __init__(self, method, symmetric, num_bins, num_quantized_bins, percentile, scenario):
         self.histogram_dict = {}
-        self.min_abs_dict = {}
         self.method = method
         self.symmetric = symmetric
         self.num_bins = num_bins
@@ -943,9 +942,6 @@ class HistogramCollector(CalibrationDataCollector):
                 max_value = np.array(0, dtype=data_arr_np.dtype)
 
             data_arr_np = np.absolute(data_arr_np)  # only consider absolute value
-            if data_arr_np.size:
-                min_abs = np.nanmin(data_arr_np)
-                self.min_abs_dict[tensor] = min(self.min_abs_dict.get(tensor, min_abs), min_abs)
 
             if tensor not in self.histogram_dict:
                 # Start at zero so later batches with smaller absolute values are included.
@@ -970,11 +966,15 @@ class HistogramCollector(CalibrationDataCollector):
                     old_range = float(old_hist_edges[-1]) - float(old_hist_edges[0])
                     merge_factor = int(np.ceil((float(temp_amax) - float(old_hist_edges[0])) / old_range))
                     old_hist = np.add.reduceat(old_hist, range(0, len(old_hist), merge_factor))
+                    new_range = merge_factor * old_range
+                    # If all previous values fit in bin 0, use the new maximum without rounding up.
+                    if float(temp_amax) - float(old_hist_edges[0]) >= self.num_bins * old_range:
+                        new_range = float(temp_amax) - float(old_hist_edges[0])
                     # Clip overflowing edges without changing the merged bins' widths.
                     old_hist_edges = (
                         np.linspace(
                             float(old_hist_edges[0]),
-                            float(old_hist_edges[0]) + merge_factor * old_range,
+                            float(old_hist_edges[0]) + new_range,
                             self.num_bins + 1,
                             dtype=np.float64,
                         )
@@ -1086,17 +1086,12 @@ class HistogramCollector(CalibrationDataCollector):
             total = hist.sum()
             cdf = np.cumsum(hist / total)
             if self.symmetric:
-                idx_right = np.searchsorted(cdf, percentile / 100.0)
-                min_abs = self.min_abs_dict.get(tensor, 0)
-                if idx_right == 0 and min_abs > 0:
-                    threshold = min_abs
-                else:
-                    # Use the first bin's upper edge when zeros were collected.
-                    threshold = hist_edges[max(1, idx_right)]
+                # Values within bin 0 cannot be resolved; use its upper edge to avoid clipping them.
+                idx_right = max(1, np.searchsorted(cdf, percentile / 100.0))
 
                 thresholds_dict[tensor] = (
-                    -np.array(threshold, dtype=hist_edges.dtype),
-                    np.array(threshold, dtype=hist_edges.dtype),
+                    -np.array(hist_edges[idx_right], dtype=hist_edges.dtype),
+                    np.array(hist_edges[idx_right], dtype=hist_edges.dtype),
                 )
             else:
                 percent_to_cut_one_side = (100.0 - percentile) / 200.0

@@ -434,7 +434,7 @@ class TestCalibrateMinMaxCalibrator(unittest.TestCase):
                 self.assertGreater(scale, 0)
                 self.assertLess(scale, 1)
 
-    def test_percentile_first_bin_preserves_small_values(self):
+    def test_percentile_first_bin_has_limited_resolution(self):
         for value in (0, 0.0001, -0.0001, 1e-7, -1e-7):
             for streaming in (False, True):
                 with self.subTest(value=value, streaming=streaming):
@@ -452,15 +452,12 @@ class TestCalibrateMinMaxCalibrator(unittest.TestCase):
                     for batch in batches:
                         collector.collect({"input": batch})
                     lowest, highest = collector.compute_collection_result()["input"][:2]
-                    expected = np.float32(abs(value)) if value else collector.histogram_dict["input"][1][1]
-                    self.assertEqual(highest, expected)
+                    self.assertEqual(highest, collector.histogram_dict["input"][1][1])
+                    self.assertGreater(highest, 0)
                     self.assertLessEqual(lowest, highest)
-                    zero_point, scale = compute_scale_zp(lowest, highest, np.uint8(0), np.uint8(255))
+                    _, scale = compute_scale_zp(lowest, highest, np.uint8(0), np.uint8(255))
                     self.assertGreater(scale, 0)
                     self.assertLess(scale, 1)
-                    if value:
-                        quantized = np.clip(np.round(np.float32(value) / scale) + zero_point, 0, 255)
-                        self.assertNotEqual(quantized, zero_point)
 
         for zero_batch in (False, True):
             with self.subTest(mixed_signs=True, zero_batch=zero_batch):
@@ -472,9 +469,23 @@ class TestCalibrateMinMaxCalibrator(unittest.TestCase):
                 if zero_batch:
                     collector.collect({"input": np.array([0], dtype=np.float32)})
                 lowest, highest = collector.compute_collection_result()["input"][:2]
-                expected = collector.histogram_dict["input"][1][1] if zero_batch else np.float32(1e-7)
+                expected = collector.histogram_dict["input"][1][1]
                 self.assertEqual(highest, expected)
                 self.assertEqual(lowest, max(-expected, data.min()))
+
+    def test_percentile_first_bin_split_matches_single_batch(self):
+        common = np.full(100000, 0.0004, dtype=np.float32)
+        rare = np.array([1e-9, 1], dtype=np.float32)
+        thresholds = []
+        for batches in ((common, rare), (np.concatenate((common, rare)),)):
+            collector = HistogramCollector("percentile", True, 2048, 128, 99.999, "same")
+            for batch in batches:
+                collector.collect({"input": batch})
+            highest = collector.compute_collection_result()["input"][1]
+            with self.subTest(num_batches=len(batches)):
+                self.assertGreaterEqual(highest, common[0])
+            thresholds.append(highest)
+        self.assertEqual(thresholds[0], thresholds[1])
 
     def test_histogram_calibrators_run(self):
         """
