@@ -573,6 +573,37 @@ class TestCalibrateMinMaxCalibrator(unittest.TestCase):
         np.testing.assert_array_equal(hist_edges, np.linspace(0, 80000, 9).clip(max=65504).astype(np.float16))
         self.assertEqual(list(hist), [1, 0, 0, 1, 0, 1, 0, 1])
 
+    def test_collect_absolute_value_float16_narrow_range(self):
+        for num_bins in (128, 512, 2048):
+            for value in (2**-24, 1e-7, 1e-4, 0.1, 1.0, 1e4):
+                for sign in (-1, 1):
+                    with self.subTest(num_bins=num_bins, value=value, sign=sign):
+                        data = np.full(17, sign * value, dtype=np.float16)
+                        collector = self._symmetric_percentile(num_bins, 99.999, [data])
+                        hist, edges = collector.histogram_dict["input"][:2]
+                        self.assertEqual(hist.sum(), data.size)
+                        self.assertEqual(hist[-1], data.size)
+                        self.assertEqual(edges.dtype, data.dtype)
+                        self.assertEqual(collector.compute_collection_result()["input"][:2], (data[0], data[0]))
+
+    def test_collect_absolute_value_float16_subnormal_step_merge(self):
+        m = np.float16(1.5e-4)
+        batches = [np.array(values, dtype=np.float16) for values in ([0, 1e-4, m], [1e-4], [2 * m])]
+        collector = self._symmetric_percentile(2048, 99.999, batches)
+        hist, edges = collector.histogram_dict["input"][:2]
+        expected = np.zeros(2048, dtype=np.int64)
+        # The old maximum stays in its inclusive bin; 1e-4 belongs in bin 683, not 839,
+        # whether it came in the first batch or a later one.
+        expected[[0, 1023, 2047]] = 1
+        expected[683] = 2
+        np.testing.assert_array_equal(hist, expected)
+        np.testing.assert_array_equal(edges, np.linspace(0.0, 2 * float(m), 2049).astype(np.float16))
+
+    def test_collect_absolute_value_float16_not_finite(self):
+        for value in (np.nan, np.inf):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self._symmetric_percentile(2048, 99.999, [np.array([0.5, value], dtype=np.float16)])
+
     def test_percentile_interpolates_within_bin(self):
         data = np.array([0.5, 0.5, 0.5, 3.5], dtype=np.float32)
         for percentile, expected in ((50, 0.875 * 2 / 3), (75, 0.875), (100, 3.5)):

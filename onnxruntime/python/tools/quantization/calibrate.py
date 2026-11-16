@@ -946,7 +946,11 @@ class HistogramCollector(CalibrationDataCollector):
             if tensor not in self.histogram_dict:
                 # first time it uses num_bins to compute histogram, anchored at zero.
                 m = np.max(data_arr_np, initial=0)
-                hist, hist_edges = np.histogram(data_arr_np, bins=self.num_bins, range=(0, m or 1))
+                bins = self.num_bins
+                if data_arr_np.dtype == np.float16 and np.isfinite(m) and self.num_bins > 0:
+                    # Match growth edges without float16 linspace step rounding.
+                    bins = np.linspace(0.0, float(m) or 1, self.num_bins + 1).astype(data_arr_np.dtype)
+                hist, hist_edges = np.histogram(data_arr_np, bins=bins, range=(0, m or 1))
                 hist_edges = hist_edges.astype(data_arr_np.dtype)
                 assert data_arr_np.dtype != np.float64, (
                     "only float32 or float16 is supported, every constant must be explicitly typed"
